@@ -9,11 +9,11 @@
   "author": "Kreijstal",
   "license": "GPL-3.0-or-later",
   "dependencies": {
-    "ffi-napi": "^4.0.3",
-    "ref-array-di": "^1.2.2",
-    "ref-napi": "^3.0.3",
-    "ref-struct-di": "^1.1.1",
-    "ref-union-di": "^1.0.1"
+    "ffi-napi": "https://github.com/Kreijstal/node-ffi-napi.git",
+    "ref-array-di": "https://github.com/node-ffi-napi/ref-array-di.git",
+    "ref-napi": "https://github.com/node-ffi-napi/ref-napi.git",
+    "ref-struct-di": "https://github.com/node-ffi-napi/ref-struct-di.git",
+    "ref-union-di": "https://github.com/alphacep/ref-union-di.git"
   },
   "devDependencies": {
 	"html-to-text": "^8.2.1",
