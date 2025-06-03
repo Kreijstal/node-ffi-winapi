@@ -2605,4 +2605,4 @@ var winapi={ffi,goodies,constants,gdi32,kernel32,ref,Union,Struct:StructType,Arr
 winapi.interfaces=winterface;
 winapi.types=wintypes
 winapi.user32=current
-module.exports=({winapi,user32:current,gdi32,kernel32,constants,wintypes});
+module.exports=({winapi,user32:current,gdi32,kernel32,constants,wintypes,...require("./eventUtils.js")});
