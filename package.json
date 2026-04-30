@@ -14,7 +14,7 @@
     "lodash.set": "^4.3.2"
   },
   "devDependencies": {
-    "html-to-text": "^9.0.0",
+    "html-to-text": "^10.0.0",
     "markdown-it": "^14.0.0"
   },
   "repository": {
