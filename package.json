@@ -15,7 +15,7 @@
   },
   "devDependencies": {
     "html-to-text": "^9.0.0",
-    "markdown-it": "^14.0.0"
+    "markdown-it": "^15.0.0"
   },
   "repository": {
     "type": "git",
