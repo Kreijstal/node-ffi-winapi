@@ -4,18 +4,25 @@
   "description": "This is supposed to be a winapi where you call it as if you called windows itself but it gives a goodies whwhere stuff simplifies.",
   "main": "winapi.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build:metadata": "node scripts/build-metadata.js",
+    "prepare": "npm run build:metadata",
+    "test": "node --test test/catalog.test.js test/windows.test.js",
+    "test:windows": "node --test test/windows.test.js",
+    "benchmark:windows": "node scripts/benchmark-windows.js"
   },
   "author": "Kreijstal",
   "license": "GPL-3.0-or-later",
   "dependencies": {
-    "lodash.get": "^4.4.2",
-    "lodash.groupby": "^4.6.0",
-    "lodash.set": "^4.3.2"
+    "ffi-napi": "git+https://github.com/Kreijstal/node-ffi-napi.git#6ce04ef3d783ce53bbea38a7f872cca552f00c28",
+    "ref-napi": "git+https://github.com/node-ffi-napi/ref-napi.git#a7f62a4caa3e0c32aeb66c015641b0bc01ba03ab",
+    "ref-array-di": "git+https://github.com/node-ffi-napi/ref-array-di.git#a48bf0013b5037c16a60e167c6a69b10e90578fc",
+    "ref-struct-di": "git+https://github.com/node-ffi-napi/ref-struct-di.git#6d6b932b34f638162a92eb2e3f43e93360435889",
+    "ref-union-di": "git+https://github.com/alphacep/ref-union-di.git#8afd47c5a768410f06ac2c1d269c2f6e4e833cfd",
+    "lodash": "^4.18.1"
   },
   "devDependencies": {
-    "html-to-text": "^9.0.0",
-    "markdown-it": "^14.0.0"
+    "html-to-text": "^10.0.1",
+    "markdown-it": "^15.0.2"
   },
   "repository": {
     "type": "git",
@@ -28,5 +35,15 @@
   "bugs": {
     "url": "https://github.com/Kreijstal/node-ffi-test/issues"
   },
-  "homepage": "https://github.com/Kreijstal/node-ffi-test#readme"
+  "homepage": "https://github.com/Kreijstal/node-ffi-test#readme",
+  "files": [
+    "*.js",
+    "lib/",
+    "metadata/",
+    "scripts/",
+    "test/"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  }
 }

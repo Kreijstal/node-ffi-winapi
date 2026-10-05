@@ -24,9 +24,9 @@ function lazySet(object, property, someExpensiveComputation) {
 
 
 
-var groupby = require("lodash.groupby")
-var _get = require("lodash.get")
-var _set = require("lodash.set")
+var groupby = require("lodash/groupBy")
+var _get = require("lodash/get")
+var _set = require("lodash/set")
 var ffi = require('ffi-napi');
 var ref = require('ref-napi');
 var Struct = require('ref-struct-di')(ref)
@@ -38,16 +38,6 @@ var fs = require('node:fs');
 var util = require('node:util');
 
 
-//Should this be optional or something?
-Buffer.prototype._toJSON=Buffer.prototype.toJSON
-Buffer.prototype.toJSON=function toJSON(){
-	var obj=this._toJSON();
-	var size=this?.type?.size;
-	var indirection=this.type.indirection;
-	var type=this?.type?.name;
-	var address=this.address();
-	return {...obj,size,indirection,type,address};
-}
 const isObject = (input) => (
 	null !== input &&  typeof input === 'object' &&     Object.getPrototypeOf(input).isPrototypeOf(Object)
 )
@@ -189,69 +179,109 @@ var nativehelper = new Proxy({
 function longeSTring(a, b) {
   return a.length > b.length ? a : b;
 }
-//var eventEmitter = new events.EventEmitter();
-var wintypes = new Proxy({}, {
-	 defineProperty: function (target, key, descriptor) {
-    if ("value" in descriptor) {
-      if (!target.hasOwnProperty("_callbacks")) {
-        target._callbacks = {};
-      }
-	   callListeners(target,key,descriptor.value)
-    }
-    return Object.defineProperty(target, key, descriptor);
-  },
-  set(target, property, value, receiver) {
-    if (!(property in target)) {
-      if (!target.hasOwnProperty("_callbacks")) {
-        target._callbacks = {};
-      }
-	   callListeners(target,property,value);
-    }
-    Reflect.set(target, property, value, receiver);
-    return true;
-  },
-  get: function(target, name) {
-    var arr, lname;
-    if (name in target) return target[name];
-    else if (name.toLowerCase() in ref.types)
-      return target[name] = ref.types[name.toLowerCase()]
-    else if (name in nativehelper){
-	  return target[name] = nativehelper[name].typeobj;
-	}
-    else if ((arr = name.match(/^[LNS]?P(C?(U?(N?(Z?(Z?(.*)|.*)|.*)|.*)|.*)|.*)/)?.slice(1).filter(_ => this.has(target, _)))?.length | 0 > 0) {
-      if ((lname = arr.reduce(longeSTring)) == "STR") {
-        return target[name] = ref.types.CString;
-      } else
-        return target[name] = ref.refType(this.get(target, lname));
-    } //else if (name[0] == "H") return target[name] = ref.types.uint64;
-  },
-  has: function(target, name) {
-    if (name in target ||
-      name.toLowerCase() in ref.types ||
-      name.match(/^[LNS]?P(C?(U?(N?(Z?(Z?(.*)|.*)|.*)|.*)|.*)|.*)/)?.slice(1).filter(_ => this.has(target, _))?.length | 0 > 0 ||
-      //name[0] == "H" ||
-	  name == "STR") return true;
-    else return false;
-  }
-});
+const reflection = require('./reflection');
+const catalog = reflection.catalog;
+const {lazyRegistry} = require('./lib/lazy-registry');
+const typeCache = new Map();
+const functionCache = new Map();
+const custom = {types: new Map(), functions: new Map(), constants: new Map()};
 
-wintypes.attr = function (property) {
-  return new Promise((resolve, reject) => {
-    if (property in wintypes) {
-      resolve(wintypes[property]);
-    } else {
-      if (!wintypes._callbacks) {
-        wintypes._callbacks = {};
+function entryFor(category, name, api) {
+  return custom[category].get((api || '') + ':' + name) || catalog.find(category, name, {api});
+}
+function readEntry(entry) { return entry.definition || catalog.read(entry); }
+function apiFor(entry) { return typeof entry.api === 'string' ? entry.api : catalog.describe(entry).api; }
+function hasEntry(category, name, options) {
+  return custom[category].has(':' + name) || catalog.has(category, name, options);
+}
+function* symbolNames(category) {
+  for (const item of catalog.list(category)) {
+    if (category !== 'types' || item.kind !== 'ComClassID') yield item.name;
+  }
+  for (const entry of custom[category].values()) {
+    if (category !== 'types' || entry.definition.Kind !== 'ComClassID') yield entry.definition.Name;
+  }
+}
+function constantsFor(type) {
+  return lazyRegistry({
+    has: name => {
+      const entry = custom.constants.get(':' + name);
+      return entry ? readConstantType(entry) === type : catalog.has('constants', name, {type});
+    },
+    names: function* () {
+      for (const item of catalog.list('constants', {type})) yield item.name;
+      for (const entry of custom.constants.values()) {
+        if (readConstantType(entry) === type) yield entry.definition.Name;
       }
-      if (!wintypes._callbacks[property]) {
-        wintypes._callbacks[property] = [];
-      }
-      wintypes._callbacks[property].push(value => {
-        resolve(value);
-      });
-    }
+    },
+    resolve: name => readEntry(custom.constants.get(':' + name) || catalog.find('constants', name, {type})).Value
   });
-};
+}
+function readConstantType(entry) { return entry.definition?.Type?.Name || entry[6]; }
+function intrinsicType(name) {
+  if (name === 'IntPtr') return ref.types[`int${ref.sizeof.pointer * 8}`];
+  if (name === 'UIntPtr') return ref.types[`uint${ref.sizeof.pointer * 8}`];
+  if (name === 'Byte') return ref.types.uint8;
+  if (name === 'SByte') return ref.types.int8;
+  if (name === 'Single') return ref.types.float;
+  if (name === 'Boolean') return ref.types.uint8;
+  return ref.types[name.toLowerCase()];
+}
+function resolveType(name, api) {
+  const key = (api || '') + ':' + name;
+  if (typeCache.has(key)) return typeCache.get(key);
+  if (!api && Object.hasOwn(typeOverrides, name)) return typeOverrides[name];
+  const entry = entryFor('types', name, api);
+  let value;
+  if (!entry) {
+    const native = intrinsicType(name);
+    if (!native) throw new Error(`Win32 type ${api ? api + '.' : ''}${name} was not found`);
+    value = Object.create(native);
+  } else {
+    const definition = readEntry(entry);
+    const namespace = apiFor(entry);
+    const qualified = namespace + ':' + name;
+    if (typeCache.has(qualified)) return typeCache.get(qualified);
+    try {
+      switch (definition.Kind) {
+        case 'Struct': case 'Union': {
+          value = definition.Kind === 'Struct' ? StructType() : new Union();
+          typeCache.set(qualified, value); // Forward declaration for self pointers.
+          fillAggregate(value, definition, namespace);
+          break;
+        }
+        case 'NativeTypedef': {
+          const base = convertApiTypeToJSType(definition.Def, undefined, namespace);
+          value = typeof base === 'function' ? base : Object.create(base);
+          break;
+        }
+        case 'Enum': value = objApiEnumToJSEnum(definition); break;
+        case 'FunctionPointer': value = fun2Type(definition, namespace); break;
+        case 'Com': value = convertWinapiInterface2ffi(definition, namespace); break;
+        default: throw new Error(`Unsupported type kind ${definition.Kind} for ${name}`);
+      }
+      typeCache.set(qualified, value);
+    } catch (error) { typeCache.delete(qualified); throw error; }
+  }
+  if (!Object.hasOwn(value, 'constants')) {
+    Object.defineProperty(value, 'constants', {value: constantsFor(name), configurable: true});
+  }
+  typeCache.set(key, value);
+  return value;
+}
+const typeOverrides = Object.create(null);
+var wintypes = lazyRegistry({
+  has: name => (hasEntry('types', name) &&
+    custom.types.get(':' + name)?.definition.Kind !== 'ComClassID' &&
+    !catalog.has('types', name, {kind:'ComClassID'})) || !!intrinsicType(name),
+  names: () => symbolNames('types'),
+  resolve: name => resolveType(name)
+}, typeOverrides);
+Object.defineProperty(typeOverrides, 'attr', {value: async name => {
+  const value = wintypes[name];
+  if (value === undefined) throw new Error(`Win32 type ${name} was not found`);
+  return value;
+}, configurable: true});
 
 function methodProxy(obj1, property1, path) {
   Object.defineProperty(obj1, property1, {
@@ -298,113 +328,87 @@ var CFTypeConstructor = function(rtype, args) {
     }
   }
 }
-wintypes.IntPtr = ref.types[`int${ref.sizeof.pointer*8}`];
-wintypes.UIntPtr = ref.types[`uint${ref.sizeof.pointer*8}`];
 
-function objApiToJSApi(obj) {
-  if (obj.Kind == "Struct") {
-    return objApiStructToJSStruct(obj);
-  } else if (obj.Kind == "Enum") {
-    return objApiEnumToJSEnum(obj);
-  } else if (obj.Kind == "Union") {
-    return objApiUnionToJSUnion(obj);
-  } else if (obj.Kind == "Array") {
-    return objApiArrayToJSArray(obj);
+
+function objApiToJSApi(obj, api, nestedTypes) {
+  switch (obj.Kind) {
+    case 'Struct': return objApiStructToJSStruct(obj, api, nestedTypes);
+    case 'Union': return objApiUnionToJSUnion(obj, api, nestedTypes);
+    case 'Enum': return objApiEnumToJSEnum(obj);
+    case 'Array': return objApiArrayToJSArray(obj, api, nestedTypes);
+    default: throw new Error('Unsupported nested type kind: ' + obj.Kind);
   }
 }
-
-function getNestedTypes(objApi) {
-  return Object.fromEntries(Object.entries((objApi.NestedTypes?.length) ? groupby(objApi.NestedTypes.map(objApiToJSApi), _ => ( /*console.log("this will break",_),*/ _.Name)) : {}).map(([a, b]) => (assert(b.length == 1), [a, b[0]])));
-
+function getNestedTypes(objApi, api, parent) {
+  const nested = Object.create(parent || null);
+  for (const definition of objApi.NestedTypes || []) {
+    if (definition.Architectures?.length && !definition.Architectures.includes(catalog.architecture)) continue;
+    lazySet(nested, definition.Name, () => objApiToJSApi(definition, api, nested));
+  }
+  return nested;
 }
-
 function getFields(someType) {
-  return Object.keys(someType.fields).flatMap(a => (someType.anonfields?.includes(a)) ? getFields(someType.fields[a].type) : a)
+  return Object.keys(someType.fields).flatMap(name => someType.anonfields?.includes(name)
+    ? getFields(someType.fields[name].type) : name);
 }
-
-
-function objApiStructToJSStruct(objApi) {
-  var nestedTypes = getNestedTypes(objApi);
-  console.log(`STRUCT nestedTypes: `, objApi.Fields.map(a => [a.Name, a.Type.Name]).filter(([n, b]) => /Anonymous.*?_e__/.test(b)).map(([a, b]) => [a, Object.keys(nestedTypes[b].fields)]));
-  var obj = StructType(Object.fromEntries(objApi.Fields.map(_ => [_.Name, convertApiTypeToJSType(_.Type, nestedTypes)])));
-  obj["anonfields"] = objApi.Fields.map(a => [a.Name, a.Type.Name]).filter(([n, b]) => /Anonymous.*?_e__/.test(b)).map(([a, b]) => {
-    console.log(getFields(nestedTypes[b]), a);
-    var attrs = getFields(nestedTypes[b]);
-    attrs.forEach(name => {
-      methodProxy(obj.prototype, name, `${a}.${name}`)
-    })
-    return a
-  });
-  obj.Name = objApi.Name;
-  return obj
+function fillAggregate(value, definition, api, parent) {
+  const nested = getNestedTypes(definition, api, parent);
+  value.Name = definition.Name;
+  for (const field of definition.Fields) {
+    value.defineProperty(field.Name, convertApiTypeToJSType(field.Type, nested, api));
+  }
+  value.anonfields = definition.Fields.filter(field => /Anonymous.*?_e__/.test(field.Type.Name || ''))
+    .map(field => {
+      for (const name of getFields(value.fields[field.Name].type)) methodProxy(value.prototype, name, `${field.Name}.${name}`);
+      return field.Name;
+    });
+  return value;
 }
-
-function convertApiTypeToJSType(type, nestedTypes) {
-  if (type.Kind == "Native") {
-    if (!wintypes[type.Name]) {
-      throw new Error(`${type.Name} not found in wintypes`);
-    } else {
-      return wintypes[type.Name];
-    }
-  } else if (type.Kind == "ApiRef") {
-    if (type.Parents.length == 0 && (!nestedTypes || (nestedTypes && !nestedTypes[type.Name]))) {
-      if (!wintypes[type.Name]) {
-        throw new Error(`${type.Name} not found in wintypes`);
-      } else {
-        return wintypes[type.Name];
+function objApiStructToJSStruct(objApi, api, nestedTypes) {
+  return fillAggregate(StructType(), objApi, api, nestedTypes);
+}
+function objApiUnionToJSUnion(objApi, api, nestedTypes) {
+  return fillAggregate(new Union(), objApi, api, nestedTypes);
+}
+function convertApiTypeToJSType(type, nestedTypes, api) {
+  switch (type.Kind) {
+    case 'Native': return resolveType(type.Name);
+    case 'ApiRef': {
+      if (nestedTypes && type.Name in nestedTypes) return nestedTypes[type.Name];
+      if (type.Parents?.length) {
+        const parent = catalog.get('types', type.Parents[0], {api: type.Api || api});
+        if (!parent) throw new Error(`Parent type ${type.Parents[0]} was not found`);
+        let scope = getNestedTypes(parent, type.Api || api);
+        // Metadata Parents identifies the enclosing aggregate(s).
+        for (const name of type.Parents.slice(1)) {
+          const child = parent.NestedTypes?.find(item => item.Name === name);
+          if (!child) throw new Error(`Nested parent ${name} was not found`);
+          scope = getNestedTypes(child, type.Api || api, scope);
+        }
+        if (!(type.Name in scope)) throw new Error(`Nested type ${type.Name} was not found`);
+        return scope[type.Name];
       }
-    } else
-    if (nestedTypes) {
-      if (!nestedTypes[type.Name]) {
-        throw new Error(`${type.Name} not found in nestedTypes: ${Object.keys(nestedTypes)}`);
-      } else {
-        return nestedTypes[type.Name];
-      }
-    } else {
-
+      return resolveType(type.Name, type.Api || api);
     }
-  } else if (type.Kind == "Array") {
-    return ArrayType(convertApiTypeToJSType(type.Child, nestedTypes), type.Shape.Size);
-  } else if (type.Kind == "PointerTo") {
-    return ref.refType(convertApiTypeToJSType(type.Child, nestedTypes));
-  } else if (type.Kind == "LPArray") {
-    //For C there is no difference, but for us there is, we can think about how to handle this later.
-    return ref.refType(convertApiTypeToJSType(type.Child, nestedTypes));
-  } else {
-    throw new Error("type " + type.Kind + " not found")
+    case 'Array': return ArrayType(convertApiTypeToJSType(type.Child, nestedTypes, api), type.Shape.Size);
+    case 'PointerTo': case 'LPArray': return ref.refType(convertApiTypeToJSType(type.Child, nestedTypes, api));
+    default: throw new Error('Unsupported API type: ' + type.Kind);
   }
 }
-
-function objApiEnumToJSEnum(objApi) {
-  var nestedTypes = getNestedTypes(objApi);
-  return "todoEnum"
+function objApiEnumToJSEnum(definition) {
+  const native = intrinsicType(definition.IntegerBase);
+  if (!native) throw new Error('Unsupported enum base: ' + definition.IntegerBase);
+  return Object.assign(Object.create(native), {name: definition.Name,
+    values: Object.fromEntries(definition.Values.map(item => [item.Name, item.Value]))});
+}
+function objApiArrayToJSArray(definition, api, nestedTypes) {
+  return convertApiTypeToJSType(definition, nestedTypes, api);
 }
 
-function objApiUnionToJSUnion(objApi) {
-  var nestedTypes = getNestedTypes(objApi);
-  console.log(`UNION nestedTypes: `, objApi.Fields.map(a => [a.Name, a.Type.Name]).filter(([n, b]) => /Anonymous.*?_e__/.test(b)).map(([a, b]) => [a, Object.keys(nestedTypes[b].fields)]));
-  var obj = new Union(Object.fromEntries(objApi.Fields.map(_ => [_.Name, convertApiTypeToJSType(_.Type, nestedTypes)])));
-  obj["anonfields"] = objApi.Fields.map(a => [a.Name, a.Type.Name]).filter(([n, b]) => /Anonymous.*?_e__/.test(b)).map(([a, b]) => {
-    console.log(getFields(nestedTypes[b]), a);
-    var attrs = getFields(nestedTypes[b]);
-    attrs.forEach(name => {
-      methodProxy(obj.prototype, name, `${a}.${name}`)
-    })
-    return a
-  });
-  obj.Name = objApi.Name
-  return obj
-}
-
-function objApiArrayToJSArray(objApi) {
-  var nestedTypes = getNestedTypes(objApi);
-  return "todoArray"
-}
-
-function fun2Type(E) {
-  var r = CFTypeConstructor(convertApiTypeToJSType(E.ReturnType), E.Params.map(a => convertApiTypeToJSType(a.Type)));
+function fun2Type(E, api) {
+  var r = CFTypeConstructor(convertApiTypeToJSType(E.ReturnType, undefined, api), E.Params.map(a => convertApiTypeToJSType(a.Type, undefined, api)));
   //assert(E.ReturnAttrs.length == 0); These are C# attributes, 
-  if (E.Platform !== null) {
+  if (debug && E.Platform !== null) {
     console.log(`Loading function ${E.Name} with Platform ${E.Platform}`)
   }
   r.SetLastError = E.SetLastError;
@@ -412,7 +416,7 @@ function fun2Type(E) {
   return r;
 
 }
-function convertWinapiInterface2ffi(interfaceWinApiJson){
+function convertWinapiInterface2ffi(interfaceWinApiJson, api){
     //an interface is just a struct :o
 var sumInterface=StructType();
     //Create type wrapper around struct
@@ -437,6 +441,7 @@ var sumInterface=StructType();
     return this._$struct.ref(...args)
   }
 Object.setPrototypeOf(InterfaceStruct, sumInterface);
+    typeCache.set((api || "") + ":" + interfaceWinApiJson.Name, InterfaceStruct);
     InterfaceStruct.get = function(buf, offset) {
         assert(offset==0,"offset is not zero, what do?");
     return new this(buf);
@@ -446,20 +451,20 @@ Object.setPrototypeOf(InterfaceStruct, sumInterface);
     if(interfaceWinApiJson.Interface){
         assert(interfaceWinApiJson.Interface.Kind=='ApiRef',"Kind!=ApiRef")
         assert(interfaceWinApiJson.Interface.TargetKind== 'Com',"TargetKind!=Com")
-        sumInterface.defineProperty("_anonymous__$parent",wintypes[interfaceWinApiJson.Interface.Name]);
-        wintypes[interfaceWinApiJson.Interface.Name].methods.forEach(prop=>methodProxy(InterfaceStruct.prototype, prop, `_anonymous__$parent.${prop}`))
-        InterfaceStruct.methods=wintypes[interfaceWinApiJson.Interface.Name].methods.slice();
+        sumInterface.defineProperty("_anonymous__$parent",resolveType(interfaceWinApiJson.Interface.Name, interfaceWinApiJson.Interface.Api || api));
+        resolveType(interfaceWinApiJson.Interface.Name, interfaceWinApiJson.Interface.Api || api).methods.forEach(prop=>methodProxy(InterfaceStruct.prototype, prop, `_anonymous__$parent.${prop}`))
+        InterfaceStruct.methods=resolveType(interfaceWinApiJson.Interface.Name, interfaceWinApiJson.Interface.Api || api).methods.slice();
         
     }
-var methods=interfaceWinApiJson.Methods.map(_=>[_.Name,method2Type(InterfaceStruct,_)]);
+var methods=interfaceWinApiJson.Methods.map(_=>[_.Name,method2Type(InterfaceStruct,_, api)]);
     methods.forEach(_=>sumInterface.defineProperty(..._));
     InterfaceStruct.methods=[...InterfaceStruct.methods,...methods.map(([n,_])=>n)];
     return InterfaceStruct;
 }
-function method2Type(InterfaceStruct,E) {
-  var r = CFTypeConstructor(convertApiTypeToJSType(E.ReturnType), [ref.refType(InterfaceStruct),...E.Params.map(a => convertApiTypeToJSType(a.Type))]);
+function method2Type(InterfaceStruct,E, api) {
+  var r = CFTypeConstructor(convertApiTypeToJSType(E.ReturnType, undefined, api), [ref.refType(InterfaceStruct),...E.Params.map(a => convertApiTypeToJSType(a.Type, undefined, api))]);
   assert(E.ReturnAttrs.length == 0);
-  if (E.Platform !== null) {
+  if (debug && E.Platform !== null) {
     console.log(`Loading function ${E.Name} with Platform ${E.Platform}`)
   }
   r.SetLastError = E.SetLastError;
@@ -483,100 +488,57 @@ function getDll(dllname) {
   return dll[dllname];
 }
 var dll = {};
-var functions = {};
-var clsIDs={}
-const debug = false
-
+const debug = process.env.WINFFI_DEBUG === '1';
 var readdir = util.promisify(fs.readdir);
 
-async function requireJSONFiles(dirPath) {
-  const fileNames = await readdir(dirPath);
-  const jsonFiles = fileNames.filter(fileName => fileName.endsWith('.json'));
-  var jsonarr = {};
-  for (const fileName of jsonFiles) {
-    const filePath = path.join(dirPath, fileName);
-    const fileData = require("./" + filePath);
-    jsonarr[fileName] = fileData;
-  }
-  return jsonarr;
+function functionPointer(name, api) {
+  const entry = entryFor('functions', name, api);
+  if (!entry) throw new Error(`Win32 function ${name} was not found`);
+  const namespace = apiFor(entry);
+  const key = namespace + ':' + name;
+  if (functionCache.has(key)) return functionCache.get(key);
+  const definition = readEntry(entry);
+  const signature = fun2Type(definition, namespace);
+  const pointer = getDll(definition.DllImport).get(name);
+  const buffer = ref.alloc(signature, pointer);
+  let callable;
+  // Preserve functions.Name.type and .deref(), while building the CIF once.
+  buffer.deref = () => callable || (callable = ffi.ForeignFunction(pointer, signature.rtype, signature.args));
+  functionCache.set(key, buffer);
+  return buffer;
 }
-
-
-function procedureConvertApiFromJSON(apitoconvert) {
-  var typesbykind = groupby(apitoconvert.Types, a => a.Kind);
-  typesbykind.Enum?.forEach(enumv => {
-    lazySet(wintypes, enumv.Name, _ => ({
-      name: enumv.Name,
-      ...nativehelper[enumv.IntegerBase].typeobj,
-      values: (enumv.Values.map(a => {
-        let x = {};
-        x[a.Name] = a.Value;
-        return x
-      }).reduce((a, b) => ({
-        ...a,
-        ...b
-      }))),
-      get(buf, offset) {
-        const _buf = buf[nativehelper[enumv.IntegerBase].readbuf](offset);
-        if (debug) {
-          if (enumv.Flags) {
-            return {
-              flags: Object.entries(this.values).filter(a => _buf & a[1]).map(a => a[0]),
-              _$debugValue: _buf
-            }
-          } else {
-            return {
-              possibleFlags: Object.entries(this.values).filter(a => a[1] == _buf).map(a => a[0]),
-              _$debugValue: _buf
-            }
-          }
-        } else
-          return _buf;
-      },
-      set(buf, offset, val) {
-        var setstr = nativehelper[enumv.IntegerBase].writebuf
-        if (debug && val._$debugValue) {
-          buf[setstr](val._$debugValue, offset);
-        } else if (Buffer.isBuffer(val)) {
-          val.copy(buf, offset, 0, this.size);
-        } else if (typeof val == "number") {
-          buf[setstr](val, offset);
-        } else {
-          var a = +this.values[val]
-          a = a ?? val;
-          buf[setstr](a, offset);
-        }
-      }
-    }));
-  });
-
-  typesbykind.NativeTypedef?.forEach(A => lazySet(wintypes, A.Name, _ => convertApiTypeToJSType(A.Def)));
-  //ComClassID are instances of interfaces
-  
-  typesbykind.Com?.forEach(I=>lazySet(wintypes,I.Name,_=>convertWinapiInterface2ffi(I)))
-  typesbykind.ComClassID?.forEach(A=>{
-	  var i=A.Name;
-var clsID=new wintypes.GUID(Buffer.from(A.Guid.split('-').join(''), "hex"));
-clsIDs[i]=clsID;    
+function bind(name, api) { return functionPointer(name, api).deref(); }
+var functions = lazyRegistry({has: name => hasEntry('functions', name),
+  names: () => symbolNames('functions'), resolve: name => functionPointer(name)});
+var clsIDs = lazyRegistry({
+  has: name => custom.types.get(':' + name)?.definition.Kind === 'ComClassID' ||
+    catalog.has('types', name, {kind:'ComClassID'}),
+  names: function* () {
+    for (const item of catalog.list('types', {kind:'ComClassID'})) yield item.name;
+    for (const entry of custom.types.values()) {
+      if (entry.definition.Kind === 'ComClassID') yield entry.definition.Name;
+    }
+  },
+  resolve: name => new wintypes.GUID(Buffer.from(readEntry(entryFor('types', name)).Guid.replaceAll('-', ''), 'hex'))
 });
-	  
 
-  typesbykind.FunctionPointer?.forEach(E => lazySet(wintypes, E.Name, _ => fun2Type(E)));
-
-  typesbykind.Struct?.forEach(Struct => lazySet(wintypes, Struct.Name, _ => {
-    return objApiToJSApi(Struct);
-  }));
-  typesbykind.Union?.forEach(Union => lazySet(wintypes, Union.Name, _ => {
-    return objApiToJSApi(Union);
-  }));
-  apitoconvert.Constants?.forEach(_ => {
-	  wintypes.attr(_.Type.Name).then(v=>{
-    v.constants = v.constants ?? {};
-    v.constants[_.Name] = _.Value;
-	  
-  });
-  });
-  apitoconvert.Functions?.forEach(a => lazySet(functions, a.Name, _ => ref.alloc(fun2Type(a), getDll(a.DllImport).get(a.Name))));
+// Explicit bulk loading remains available for callers that request it, without
+// adding API files to require.cache or doing this work during normal startup.
+async function requireJSONFiles(dirPath) {
+  const directory = path.resolve(__dirname, dirPath);
+  const result = {};
+  for (const filename of await readdir(directory)) {
+    if (filename.endsWith('.json')) result[filename] = JSON.parse(fs.readFileSync(path.join(directory, filename), 'utf8'));
+  }
+  return result;
+}
+function procedureConvertApiFromJSON(api, namespace = '') {
+  for (const [category, field] of [['types','Types'], ['functions','Functions'], ['constants','Constants']]) {
+    for (const definition of api[field] || []) {
+      if (definition.Architectures?.length && !definition.Architectures.includes(catalog.architecture)) continue;
+      custom[category].set(namespace + ':' + definition.Name, {api: namespace, definition});
+    }
+  }
 }
 
 wintypes.GUID = StructType({
@@ -591,8 +553,8 @@ wintypes.FMTID = wintypes.GUID;
 //var apis = requireJSONFiles("win32json/api");
 
 
-module.exports={lazySet,groupby,_get,_set,ffi,ref,StructType,Union,ArrayType,assert,path,nativehelper,longeSTring,wintypes,methodProxy,CFTypeConstructor,objApiToJSApi,getNestedTypes,
+module.exports={Struct:StructType,lazySet,groupby,_get,_set,ffi,ref,StructType,Union,ArrayType,assert,path,nativehelper,longeSTring,wintypes,methodProxy,CFTypeConstructor,objApiToJSApi,getNestedTypes,
 getFields,objApiStructToJSStruct,convertApiTypeToJSType,objApiEnumToJSEnum,objApiUnionToJSUnion,objApiArrayToJSArray,fun2Type,
 convertWinapiInterface2ffi,method2Type,appendDLL,getDll,dll,functions,clsIDs,debug,readdir,requireJSONFiles,procedureConvertApiFromJSON,
-done:requireJSONFiles("win32json/api").then(_=>Object.values(_).forEach(procedureConvertApiFromJSON))
+reflection, bind, resolveType, done:Promise.resolve()
 };

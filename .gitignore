@@ -1,2 +1,4 @@
 node_modules/
 sdk-api/
+metadata/
+metadata.tmp-*/

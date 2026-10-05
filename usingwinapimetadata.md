@@ -47,7 +47,7 @@ function lazySet(object,property,someExpensiveComputation){
 
 }
 
-var groupby=require("lodash.groupby") 
+var groupby=require("lodash/groupBy")
 var ffi=require('ffi-napi');
 var ref=require('ref-napi');
 var StructType=require('ref-struct-di')(ref)

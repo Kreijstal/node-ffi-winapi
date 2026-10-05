@@ -1,7 +1,6 @@
 var winapicore=require('./winapijson.js')
 var {ffi,ref, ArrayType,Struct, Union,wintypes}=winapicore;
 var util=require("node:util");
-var {performance}=require("node:perf_hooks")
 var constants={};
 function MAKELANGID(p,s){
 	return s<<10|p;
@@ -30,52 +29,12 @@ var errorResults={
 	RegisterClassA:nonZero,
 	GetRawInputDeviceList:_=>_==(-1>>>0)
 }
-var fnproxy=new Proxy({},{
-	get: function(target, name) {
-    if (name in target) return target[name];
-	if (name in winapicore.functions){
-		let fn= winapicore.functions[name].deref();
-		var wat=(..._)=>{
-			var startTime = performance.now()
-
-let res=fn(..._);
-    
-var endTime = performance.now()
-console.log(`Call to ${name} took ${endTime - startTime} milliseconds`)
-			return res;
-			};
-		//if(winapicore.functions[name].type.SetLastError){
-		if(false){//slo?
-			if(name in errorResults){
-				return target[name]=(..._)=>{var result;
-		result=wat(..._);
-			if(errorResults[name](result)){
-			var errorText=Win32Exception();
-			console.log("function errorMessage:",{name,/*arg:_,result,*/errorText});
-			return result;
-			}else return result;
-	}
-			}else
-			return target[name]=(..._)=>{var result;
-		result=wat(..._);
-			var errorText=Win32Exception();
-			console.log("function errorMessage:",{name,/*arg:_,result,*/errorText});
-			return result;
-
-	}	
-		}else{
-			return target[name]=wat
-		}
-	}
-    
-  },
-  has: function(target, name) {
-    return name in target ||      name in winapicore.functions ;
-  },ownKeys(target) {
-      return Object.keys(winapicore.functions);
-    }
-	
-})
+const {lazyRegistry} = require('./lib/lazy-registry');
+var fnproxy = lazyRegistry({
+  has: name => name in winapicore.functions,
+  names: () => Object.keys(winapicore.functions),
+  resolve: name => winapicore.bind(name)
+});
 
 
 function Win32Exception(){
@@ -120,7 +79,6 @@ goodies.Win32Exception=Win32Exception;
 var defaultFcts={message:function(message){
 	//	messages.map(_=>{//Performance cost is too great, isn't it amazing?
 	//if(wintypes.msg[message.message]){
-		console.log("message event handler is indeed executed")
 	win32messageHandler.emit(message.message,message.lParam,message.wParam);
 	fnproxy.TranslateMessage(message.ref());
 	fnproxy.DispatchMessageA(message.ref());
@@ -165,9 +123,7 @@ function typePointerBuffer(p,t){
 win32messageHandler.oneTimeListen("message",_=>setInterval(_=>{
 	var i=0;
 	//Don't use GetMessage, it blocks making node unable to do anything else!
-	console.log("message listened",_)
 	while(fnproxy.PeekMessageA(goodies.MSG.ref(),0,0,0,wintypes.PEEK_MESSAGE_REMOVE_TYPE.values.PM_REMOVE)){
-		console.log("THIS IS NOT BEING EXECUTED!!!")
 		win32messageHandler.emit("message",goodies.MSG);
 	}		
 },0),_=>{clearInterval(_);return true});
@@ -325,7 +281,6 @@ goodies.createWindow=function createWindow(params){
 
 	var WindowProc=
 		(hwnd, uMsg, wParam, lParam) => {
-			console.log("Windows has called WindowProc")
 			//console.log('WndProc callback',winapi.msg[uMsg],uMsg.toString(16),"wParam:",wParam,"lParam:",ref.address(lParam));
 			let result = 0;
 			var obj={hwnd,wParam,lParam};
@@ -336,11 +291,9 @@ goodies.createWindow=function createWindow(params){
 				result=obj.result;
 			}else
 			{
-				console.log("WindowProc before DefWindowProcA")
 				result = fnproxy.DefWindowProcA(hwnd, uMsg, wParam, lParam); 
 			}
 			//console.info('Sending LRESULT: ' + result) 
-			console.log("WindowProc returned")
 			return result
 		};
 	
@@ -594,6 +547,6 @@ winapi.types=wintypes
 winapi.user32=current
 
 */
-module.exports=({goodies,constants,done:done.then(_=>{
+module.exports=({goodies,constants,fn:fnproxy,winapicore,wintypes,reflection:winapicore.reflection,done:done.then(_=>{
 	return {fn:fnproxy,winapicore}
 })});
