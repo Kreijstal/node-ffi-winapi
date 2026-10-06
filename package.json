@@ -13,7 +13,7 @@
   "author": "Kreijstal",
   "license": "GPL-3.0-or-later",
   "dependencies": {
-    "ffi-napi": "git+https://github.com/Kreijstal/node-ffi-napi.git#6ce04ef3d783ce53bbea38a7f872cca552f00c28",
+    "ffi-napi": "git+https://github.com/Kreijstal/node-ffi-napi.git#566f2681ba162c38ac308c8d9f01a7df97b62de7",
     "ref-napi": "git+https://github.com/node-ffi-napi/ref-napi.git#a7f62a4caa3e0c32aeb66c015641b0bc01ba03ab",
     "ref-array-di": "git+https://github.com/node-ffi-napi/ref-array-di.git#a48bf0013b5037c16a60e167c6a69b10e90578fc",
     "ref-struct-di": "git+https://github.com/node-ffi-napi/ref-struct-di.git#6d6b932b34f638162a92eb2e3f43e93360435889",
